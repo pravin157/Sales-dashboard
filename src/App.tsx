@@ -98,6 +98,7 @@ const downloadCalls = (calls: CallRow[]) => {
 
 export const App = () => {
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [host, setHost] = useState<"local" | "vercel">("local");
   const [keyId, setKeyId] = useState("");
   const [keySecret, setKeySecret] = useState("");
   const [saving, setSaving] = useState(false);
@@ -138,12 +139,19 @@ export const App = () => {
 
   useEffect(() => {
     fetch("/api/status")
-      .then((res) => res.json())
-      .then((body: { configured: boolean }) => {
+      .then(async (res) => {
+        const body = (await res.json()) as { configured?: boolean; host?: string };
+        if (!res.ok || typeof body.configured !== "boolean") {
+          throw new Error("The report API is not responding.");
+        }
+        return { configured: body.configured, host: body.host };
+      })
+      .then((body) => {
         setConfigured(body.configured);
+        if (body.host === "vercel") setHost("vercel");
         if (body.configured) void loadReport();
       })
-      .catch(() => setError("The local report server is not responding."));
+      .catch(() => setError("The report API is not responding."));
     // Load once on open; later loads go through the date form.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -324,9 +332,18 @@ export const App = () => {
         <p className="mb-4 rounded-lg border border-[#efc8c4] bg-[var(--red-soft)] px-3 py-2 text-sm text-[var(--red)]">{error}</p>
       )}
 
-      {source === "cloudtalk" && configured === null && <p className="text-sm text-[var(--muted)]">Checking the API key…</p>}
+      {source === "cloudtalk" && configured === null && !error && <p className="text-sm text-[var(--muted)]">Checking the API key…</p>}
 
-      {source === "cloudtalk" && configured === false && (
+      {source === "cloudtalk" && configured === false && host === "vercel" && (
+        <section className="max-w-lg rounded-xl border border-[var(--line)] bg-[var(--surface)] p-5">
+          <h2 className="text-lg font-semibold">Connect CloudTalk</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            In the Vercel project, open Settings → Environment Variables and add <span className="mono">CLOUDTALK_KEY_ID</span> and <span className="mono">CLOUDTALK_KEY_SECRET</span> for Production. Redeploy after saving them. The key form on this page only works on the local server.
+          </p>
+        </section>
+      )}
+
+      {source === "cloudtalk" && configured === false && host !== "vercel" && (
         <section className="max-w-lg rounded-xl border border-[var(--line)] bg-[var(--surface)] p-5">
           <h2 className="text-lg font-semibold">Connect CloudTalk</h2>
           <p className="mt-1 text-sm text-[var(--muted)]">
