@@ -1,6 +1,4 @@
-import { handleApi } from "../src/http.ts";
-
-export const maxDuration = 60;
+import { handleApi } from "./http.js";
 
 export default {
   fetch(request: Request) {
