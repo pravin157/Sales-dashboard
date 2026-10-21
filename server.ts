@@ -99,19 +99,24 @@ app.get("/api/report", async (req, res) => {
 
 const PORT = Number(process.env.PORT) || 3200;
 
-if (process.env.NODE_ENV !== "production") {
-  const { createServer } = await import("vite");
-  const server = app.listen(PORT, () => console.log(`CloudTalk report on http://localhost:${PORT}`));
-  const vite = await createServer({
-    server: { middlewareMode: true, hmr: { server } },
-    appType: "spa",
-  });
-  app.use(vite.middlewares);
-} else {
+async function start() {
+  if (process.env.NODE_ENV !== "production") {
+    const { createServer } = await import("vite");
+    const server = app.listen(PORT, () => console.log(`CloudTalk report on http://localhost:${PORT}`));
+    const vite = await createServer({
+      server: { middlewareMode: true, hmr: { server } },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+    return;
+  }
+
   const dist = path.join(process.cwd(), "dist");
   app.use(express.static(dist));
   app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
   app.listen(PORT, () => console.log(`CloudTalk report on port ${PORT}`));
 }
+
+start();
 
 export default app;
