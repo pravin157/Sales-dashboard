@@ -11,6 +11,7 @@ const initialRange = () => {
   const to = new Date();
   const from = new Date();
   from.setDate(from.getDate() - 29);
+  // Only the start has a time; the range always runs to the end of the To date.
   return { from: iso(from), fromTime: "00:00", to: iso(to), toTime: "23:59" };
 };
 
@@ -325,11 +326,6 @@ export const App = () => {
                 className="mt-1 block rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5"
               />
             </label>
-            <TimePicker
-              label="To time"
-              value={range.toTime}
-              onChange={(toTime) => setRange((current) => ({ ...current, toTime }))}
-            />
             <button
               type="submit"
               disabled={source === "frejun" ? frejunLoading : loading}
