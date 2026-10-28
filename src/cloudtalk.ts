@@ -18,8 +18,10 @@ import type {
 const BASE = "https://my.cloudtalk.io/api";
 const CREDENTIALS_FILE = path.join(process.cwd(), ".credentials.json");
 const PAGE_LIMIT = 100;
-const MAX_CALL_PAGES = 5;
+const MAX_CALL_PAGES = 20;
 const MIN_GAP_MS = 1200;
+const REPORT_TTL_MS = 5 * 60_000;
+const DIRECTORY_TTL_MS = 10 * 60_000;
 
 let requestQueue: Promise<void> = Promise.resolve();
 let lastRequestAt = 0;
@@ -432,7 +434,7 @@ const summarizeLine = (number: NumberRow, rows: CallRow[], total: number | null,
 export const buildReport = (from: string, to: string): Promise<Report> => {
   const key = `${from}|${to}`;
   const cached = reportCache.get(key);
-  if (cached && Date.now() - cached.at < 90_000) return Promise.resolve(cached.report);
+  if (cached && Date.now() - cached.at < REPORT_TTL_MS) return Promise.resolve(cached.report);
   const pending = reportInflight.get(key);
   if (pending) return pending;
   const run = buildReportUncached(from, to)
@@ -452,66 +454,101 @@ export const buildReport = (from: string, to: string): Promise<Report> => {
 const reportCache = new Map<string, { at: number; report: Report }>();
 const reportInflight = new Map<string, Promise<Report>>();
 
-const buildReportUncached = async (from: string, to: string): Promise<Report> => {
-  const dateQuery = { date_from: stamp(from, false), date_to: stamp(to, true) };
+type Fetched = Awaited<ReturnType<typeof fetchPages>>;
+type Directory = {
+  agentsPage: Fetched;
+  numbersPage: Fetched;
+  groupsPage: Fetched;
+  tagsPage: Fetched;
+  contactsPage: Fetched;
+  notesPage: Fetched;
+};
 
-  const [agentsPage, numbersPage] = await Promise.all([
+/** Agents, numbers, contacts, etc. do not depend on the date range, so a new range only refetches calls. */
+let directoryCache: { at: number; directory: Directory } | null = null;
+let directoryInflight: Promise<Directory> | null = null;
+
+const loadDirectory = (): Promise<Directory> => {
+  if (directoryCache && Date.now() - directoryCache.at < DIRECTORY_TTL_MS) return Promise.resolve(directoryCache.directory);
+  if (directoryInflight) return directoryInflight;
+  const run = Promise.all([
     fetchPages("/agents/index.json", {}, 5),
     fetchPages("/numbers/index.json", {}, 5),
+    fetchPages("/groups/index.json", {}, 5),
+    fetchPages("/tags/index.json", {}, 5),
+    fetchPages("/contacts/index.json", {}, 5),
+    fetchPages("/notes/index.json", {}, 3),
+  ])
+    .then(([agentsPage, numbersPage, groupsPage, tagsPage, contactsPage, notesPage]) => {
+      const directory = { agentsPage, numbersPage, groupsPage, tagsPage, contactsPage, notesPage };
+      const failed = Object.values(directory).some((page) => page.error);
+      // Do not hold on to a partial directory; retry it on the next load.
+      directoryCache = failed ? null : { at: Date.now(), directory };
+      return directory;
+    })
+    .finally(() => {
+      directoryInflight = null;
+    });
+  directoryInflight = run;
+  return run;
+};
+
+/** Complete call downloads, so a range inside one already loaded is filtered locally instead of refetched. */
+const callsCache: { from: string; to: string; at: number; items: unknown[] }[] = [];
+
+const loadCalls = async (from: string, to: string): Promise<Fetched> => {
+  const now = Date.now();
+  const cover = callsCache.find((entry) => now - entry.at < REPORT_TTL_MS && entry.from <= from && entry.to >= to);
+  if (cover) {
+    const items = cover.items.filter((row) => {
+      const day = isoDay(mapCall(row, new Map()).startedAt);
+      return day != null && day >= from && day <= to;
+    });
+    return { items, total: items.length };
+  }
+  const page = await fetchPages("/calls/index.json", { date_from: stamp(from, false), date_to: stamp(to, true) }, MAX_CALL_PAGES);
+  if (!page.error && page.items.length >= (page.total ?? 0)) {
+    callsCache.unshift({ from, to, at: now, items: page.items });
+    callsCache.length = Math.min(callsCache.length, 5);
+  }
+  return page;
+};
+
+const buildReportUncached = async (from: string, to: string): Promise<Report> => {
+  // One date-range query for all calls instead of one query per number; lines are matched afterwards.
+  const [directory, callsPage, statsPage] = await Promise.all([
+    loadDirectory(),
+    loadCalls(from, to),
+    getPage("/statistics/realtime/groups.json"),
   ]);
+  const { agentsPage, numbersPage, groupsPage, tagsPage, contactsPage, notesPage } = directory;
 
   const agents = agentsPage.items.map(mapAgent).filter((agent) => agent.id || agent.name);
   const agentNames = new Map(agents.map((agent) => [agent.id, agent.name]));
   const numbers = numbersPage.items.map(mapNumber);
   const calls: CallRow[] = [];
-  const lines: LineSummary[] = [];
   const seen = new Set<string>();
-  let callsTotal = 0;
-  let callsError: string | undefined;
-  if (!numbers.length && numbersPage.error) callsError = numbersPage.error;
+  const callsTotal = callsPage.total ?? 0;
+  const callsError = callsPage.error;
 
-  const takeCalls = (items: unknown[], line?: NumberRow) => {
-    for (const row of items) {
-      const call = mapCall(row, agentNames);
-      if (line) {
-        call.lineId = line.id;
-        call.lineName = line.name || line.e164;
-      }
-      if (!call.id && !call.startedAt) continue;
-      if (call.id && seen.has(call.id)) continue;
-      if (call.id) seen.add(call.id);
-      calls.push(call);
+  for (const row of callsPage.items) {
+    const call = mapCall(row, agentNames);
+    if (!call.id && !call.startedAt) continue;
+    if (call.id && seen.has(call.id)) continue;
+    if (call.id) seen.add(call.id);
+    const line = numbers.find((number) => sameLine(call.internalNumber, number.e164));
+    if (line) {
+      call.lineId = line.id;
+      call.lineName = line.name || line.e164;
     }
-  };
-
-  if (numbers.length) {
-    for (const number of numbers) {
-      const page = await fetchPages(
-        "/calls/index.json",
-        { ...dateQuery, public_internal: number.e164 },
-        MAX_CALL_PAGES,
-      );
-      const before = calls.length;
-      takeCalls(page.items, number);
-      const rows = calls.slice(before);
-      if (page.total != null) callsTotal += page.total;
-      if (page.error) callsError = callsError || page.error;
-      lines.push(summarizeLine(number, rows, page.total, page.error));
-    }
-  } else {
-    const page = await fetchPages("/calls/index.json", dateQuery, MAX_CALL_PAGES);
-    takeCalls(page.items);
-    callsTotal = page.total ?? calls.length;
-    if (page.error) callsError = page.error;
+    calls.push(call);
   }
 
-  const [groupsPage, tagsPage, contactsPage, notesPage, statsPage] = await Promise.all([
-    fetchPages("/groups/index.json", {}, 5),
-    fetchPages("/tags/index.json", {}, 5),
-    fetchPages("/contacts/index.json", {}, 5),
-    fetchPages("/notes/index.json", {}, 3),
-    getPage("/statistics/realtime/groups.json"),
-  ]);
+  const complete = !callsError && calls.length >= callsTotal;
+  const lines: LineSummary[] = numbers.map((number) => {
+    const rows = calls.filter((call) => call.lineId === number.id);
+    return summarizeLine(number, rows, complete ? rows.length : null, callsError);
+  });
 
   calls.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
 
