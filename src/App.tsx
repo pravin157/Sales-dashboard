@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Bucket, CallRow, Report, SourceStatus } from "./types";
 import type { FrejunReport } from "./frejun";
 
@@ -777,17 +777,51 @@ const axisLabel = (bucket: Bucket) => {
 };
 
 const Chart = ({ title, buckets }: { title: string; buckets: Bucket[] }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const update = () => {
+      const w = Math.round(el.clientWidth);
+      if (w > 0) setContainerWidth((prev) => (prev === w ? prev : w));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  if (!buckets || buckets.length === 0) {
+    return (
+      <article className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-4">
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <p className="mt-2 text-sm text-[var(--muted)]">No calls in this range.</p>
+      </article>
+    );
+  }
+
   const peak = Math.max(1, ...buckets.map((bucket) => bucket.calls));
   const total = buckets.reduce((sum, bucket) => sum + bucket.calls, 0);
   const busiest = buckets.reduce((best, bucket) => (bucket.calls > best.calls ? bucket : best), buckets[0]);
-  const plotH = 168;
-  const top = 22;
-  const labelH = 58;
-  const padL = 8;
-  const barW = 16;
-  const gap = 14;
-  const width = padL + buckets.length * (barW + gap);
+
+  const plotH = 160;
+  const top = 26;
+  const labelH = 56;
+  const padLeft = 40;
+  const padRight = 16;
   const height = top + plotH + labelH;
+  const baselineY = top + plotH;
+
+  const availableWidth = containerWidth > 0 ? containerWidth : 700;
+  const minSlotW = 28;
+  const minChartWidth = padLeft + padRight + buckets.length * minSlotW;
+  const chartWidth = Math.max(availableWidth, minChartWidth);
+  const usableWidth = chartWidth - padLeft - padRight;
+  const slotWidth = usableWidth / buckets.length;
+  const barW = Math.max(8, Math.min(32, slotWidth * 0.55));
+  const isRotated = slotWidth < 55;
 
   return (
     <article className="rounded-xl border border-[var(--line)] bg-[var(--surface)] p-4">
@@ -799,44 +833,142 @@ const Chart = ({ title, buckets }: { title: string; buckets: Bucket[] }) => {
           </p>
         )}
       </div>
-      {total === 0 && <p className="text-sm text-[var(--muted)]">No calls in this range.</p>}
-      {total > 0 && (
-        <div className="overflow-x-auto">
+      {total === 0 ? (
+        <p className="text-sm text-[var(--muted)]">No calls in this range.</p>
+      ) : (
+        <div ref={containerRef} className="w-full overflow-x-auto">
           <svg
-            width="100%"
-            viewBox={`0 0 ${width} ${height}`}
+            width={chartWidth}
+            height={height}
+            viewBox={`0 0 ${chartWidth} ${height}`}
             role="img"
             aria-label={title}
-            className="min-w-[640px]"
+            className="block"
+            style={{
+              width: chartWidth > availableWidth ? `${chartWidth}px` : "100%",
+              height: `${height}px`,
+              minHeight: `${height}px`,
+            }}
           >
-            <line x1={padL} y1={top + plotH} x2={width} y2={top + plotH} stroke="#e2dbd0" />
-            <text x={padL} y={14} fill="#5e6a64" fontSize="11">
+            {/* Top peak grid line & label */}
+            <line
+              x1={padLeft}
+              y1={top}
+              x2={chartWidth - padRight}
+              y2={top}
+              stroke="#ece7df"
+              strokeDasharray="3 3"
+            />
+            <text
+              x={padLeft - 8}
+              y={top + 4}
+              textAnchor="end"
+              fill="#5e6a64"
+              fontSize="11"
+              fontFamily="inherit"
+            >
               {peak}
             </text>
+
+            {/* Mid grid line & label if peak > 1 */}
+            {peak > 1 && (
+              <>
+                <line
+                  x1={padLeft}
+                  y1={top + plotH / 2}
+                  x2={chartWidth - padRight}
+                  y2={top + plotH / 2}
+                  stroke="#f2eee7"
+                  strokeDasharray="3 3"
+                />
+                <text
+                  x={padLeft - 8}
+                  y={top + plotH / 2 + 4}
+                  textAnchor="end"
+                  fill="#8c9791"
+                  fontSize="10"
+                  fontFamily="inherit"
+                >
+                  {Math.round(peak / 2)}
+                </text>
+              </>
+            )}
+
+            {/* Baseline & 0 label */}
+            <line
+              x1={padLeft}
+              y1={baselineY}
+              x2={chartWidth - padRight}
+              y2={baselineY}
+              stroke="#e2dbd0"
+            />
+            <text
+              x={padLeft - 8}
+              y={baselineY + 3}
+              textAnchor="end"
+              fill="#8c9791"
+              fontSize="10"
+              fontFamily="inherit"
+            >
+              0
+            </text>
+
+            {/* Bars and labels */}
             {buckets.map((bucket, index) => {
               const barH = bucket.calls === 0 ? 0 : Math.max(4, (bucket.calls / peak) * (plotH - 8));
-              const x = padL + index * (barW + gap);
-              const y = top + plotH - barH;
+              const centerX = padLeft + (index + 0.5) * slotWidth;
+              const x = centerX - barW / 2;
+              const y = baselineY - barH;
               const label = axisLabel(bucket);
+
               return (
                 <g key={bucket.key}>
                   <title>{`${label}: ${bucket.calls} calls`}</title>
                   {bucket.calls > 0 && (
-                    <text x={x + barW / 2} y={y - 4} textAnchor="middle" fill="#1b2421" fontSize="11" fontWeight="600">
+                    <text
+                      x={centerX}
+                      y={y - 5}
+                      textAnchor="middle"
+                      fill="#1b2421"
+                      fontSize="11"
+                      fontWeight="600"
+                      fontFamily="inherit"
+                    >
                       {bucket.calls}
                     </text>
                   )}
-                  <rect x={x} y={y} width={barW} height={barH} rx="2" fill={bucket.calls ? "#0f6e62" : "transparent"} />
-                  <text
-                    x={x + barW / 2}
-                    y={top + plotH + 10}
-                    textAnchor="start"
-                    fill="#5e6a64"
-                    fontSize="11"
-                    transform={`rotate(55 ${x + barW / 2} ${top + plotH + 10})`}
-                  >
-                    {label}
-                  </text>
+                  <rect
+                    x={x}
+                    y={y}
+                    width={barW}
+                    height={barH}
+                    rx="3"
+                    fill={bucket.calls ? "#0f6e62" : "transparent"}
+                  />
+                  {isRotated ? (
+                    <text
+                      x={centerX}
+                      y={baselineY + 10}
+                      textAnchor="start"
+                      fill="#5e6a64"
+                      fontSize="11"
+                      fontFamily="inherit"
+                      transform={`rotate(55 ${centerX} ${baselineY + 10})`}
+                    >
+                      {label}
+                    </text>
+                  ) : (
+                    <text
+                      x={centerX}
+                      y={baselineY + 18}
+                      textAnchor="middle"
+                      fill="#5e6a64"
+                      fontSize="11"
+                      fontFamily="inherit"
+                    >
+                      {label}
+                    </text>
+                  )}
                 </g>
               );
             })}
