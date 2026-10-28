@@ -17,7 +17,42 @@ const initialRange = () => {
 
 type Range = ReturnType<typeof initialRange>;
 
-const selectClass = "rounded-md border border-[var(--line)] bg-[var(--surface)] px-1.5 py-1.5";
+const CALLS_PER_PAGE = 10;
+
+/** Splits rows into pages of 10 and goes back to the first page whenever the rows change. */
+const usePage = <T,>(rows: T[]) => {
+  const [page, setPage] = useState(1);
+  useEffect(() => setPage(1), [rows]);
+  const pages = Math.max(1, Math.ceil(rows.length / CALLS_PER_PAGE));
+  const current = Math.min(page, pages);
+  const start = (current - 1) * CALLS_PER_PAGE;
+  return { page: current, pages, setPage, start, total: rows.length, rows: rows.slice(start, start + CALLS_PER_PAGE) };
+};
+
+const Pager = ({ paged }: { paged: ReturnType<typeof usePage> }) => {
+  if (!paged.total) return null;
+  const button = "rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1 text-sm disabled:opacity-40";
+  return (
+    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted)]">
+      <span>
+        Showing {paged.start + 1}–{paged.start + paged.rows.length} of {paged.total} calls
+      </span>
+      <span className="flex items-center gap-2">
+        <button type="button" className={button} disabled={paged.page <= 1} onClick={() => paged.setPage(paged.page - 1)}>
+          Previous
+        </button>
+        <span>
+          Page {paged.page} of {paged.pages}
+        </span>
+        <button type="button" className={button} disabled={paged.page >= paged.pages} onClick={() => paged.setPage(paged.page + 1)}>
+          Next
+        </button>
+      </span>
+    </div>
+  );
+};
+
+const selectClass ="rounded-md border border-[var(--line)] bg-[var(--surface)] px-1.5 py-1.5";
 
 /** 12-hour picker with an explicit AM/PM choice; the value stays 24-hour "HH:MM". */
 const TimePicker = ({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) => {
@@ -259,6 +294,8 @@ export const App = () => {
         .includes(needle);
     });
   }, [lineCalls, query, direction, result]);
+
+  const callPage = usePage(filteredCalls);
 
   const selectedLine = report?.lines.find((line) => line.id === lineId) ?? null;
 
@@ -581,7 +618,7 @@ export const App = () => {
                   {filteredCalls.length === 0 && (
                     <tr><td colSpan={8} className="px-3 py-4 text-[var(--muted)]">No calls match this view.</td></tr>
                   )}
-                  {filteredCalls.slice(0, 200).map((call) => (
+                  {callPage.rows.map((call) => (
                     <tr key={`${call.id}-${call.startedAt}`} className="border-b border-[var(--line)] last:border-0">
                       <td className="px-3 py-2 whitespace-nowrap">{when(call.startedAt)}</td>
                       <td className="px-3 py-2">
@@ -607,9 +644,7 @@ export const App = () => {
                 </tbody>
               </table>
             </div>
-            {filteredCalls.length > 200 && (
-              <p className="mt-1 text-xs text-[var(--muted)]">Showing 200 of {filteredCalls.length} matching calls. Download the CSV for the full filtered list.</p>
-            )}
+            <Pager paged={callPage} />
           </section>
 
           <section className="grid gap-4 lg:grid-cols-2">
@@ -668,7 +703,10 @@ const FrejunPanel = ({
   onLine: (id: string) => void;
 }) => {
   const line = report?.lines.find((item) => item.id === lineId) ?? null;
-  const calls = (report?.calls ?? []).filter((call) => lineId === "all" || call.virtualNumber === lineId);
+  const calls = useMemo(
+    () => (report?.calls ?? []).filter((call) => lineId === "all" || call.virtualNumber === lineId),
+    [report, lineId],
+  );
   const daily = useMemo(
     () => (report ? bucketsFor(calls.map((call) => ({ startedAt: call.startedAt, answered: call.answered, talkingSeconds: call.durationSeconds })), report.range.from, report.range.to) : []),
     [calls, report],
@@ -686,6 +724,7 @@ const FrejunPanel = ({
     }
     return [...map.values()].sort((a, b) => b.calls - a.calls);
   }, [report, lineId, calls]);
+  const callPage = usePage(calls);
 
   if (loading && !report) return <p className="text-sm text-[var(--muted)]">Loading Frejun…</p>;
   if (error) return <p className="rounded-lg border border-[#efc8c4] bg-[var(--red-soft)] px-3 py-2 text-sm text-[var(--red)]">{error}</p>;
@@ -767,7 +806,7 @@ const FrejunPanel = ({
             </thead>
             <tbody>
               {calls.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-[var(--muted)]">No calls in this range.</td></tr>}
-              {calls.slice(0, 200).map((call) => (
+              {callPage.rows.map((call) => (
                 <tr key={call.id} className="border-b border-[var(--line)] last:border-0">
                   <td className="px-3 py-2 whitespace-nowrap">{when(call.startedAt)}</td>
                   <td className="px-3 py-2 mono text-xs">{call.virtualNumber || "—"}</td>
@@ -784,7 +823,7 @@ const FrejunPanel = ({
             </tbody>
           </table>
         </div>
-        {calls.length > 200 && <p className="mt-1 text-xs text-[var(--muted)]">Showing 200 of {calls.length} calls.</p>}
+        <Pager paged={callPage} />
       </section>
     </div>
   );
