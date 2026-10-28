@@ -333,18 +333,6 @@ export const App = () => {
             >
               {source === "frejun" ? (frejunLoading ? "Loading…" : "Refresh") : loading ? "Loading…" : "Refresh"}
             </button>
-            {source === "cloudtalk" && (
-            <button
-              type="button"
-              onClick={() => {
-                setConfigured(false);
-                setReport(null);
-              }}
-              className="rounded-md border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-sm"
-            >
-              Change key
-            </button>
-            )}
           </form>
         )}
       </header>
