@@ -11,8 +11,55 @@ const initialRange = () => {
   const to = new Date();
   const from = new Date();
   from.setDate(from.getDate() - 29);
-  return { from: iso(from), to: iso(to) };
+  return { from: iso(from), fromTime: "00:00", to: iso(to), toTime: "23:59" };
 };
+
+type Range = ReturnType<typeof initialRange>;
+
+const selectClass = "rounded-md border border-[var(--line)] bg-[var(--surface)] px-1.5 py-1.5";
+
+/** 12-hour picker with an explicit AM/PM choice; the value stays 24-hour "HH:MM". */
+const TimePicker = ({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) => {
+  const [hours, minutes] = value.split(":").map(Number);
+  const period = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 || 12;
+  const emit = (nextHour12: number, nextMinutes: number, nextPeriod: string) => {
+    const nextHours = (nextHour12 % 12) + (nextPeriod === "PM" ? 12 : 0);
+    onChange(`${String(nextHours).padStart(2, "0")}:${String(nextMinutes).padStart(2, "0")}`);
+  };
+  return (
+    <label className="text-xs text-[var(--muted)]">
+      {label}
+      <span className="mt-1 flex gap-1">
+        <select aria-label={`${label} hour`} value={hour12} onChange={(event) => emit(Number(event.target.value), minutes, period)} className={selectClass}>
+          {Array.from({ length: 12 }, (_, index) => index + 1).map((hour) => (
+            <option key={hour} value={hour}>{hour}</option>
+          ))}
+        </select>
+        <select aria-label={`${label} minute`} value={minutes} onChange={(event) => emit(hour12, Number(event.target.value), period)} className={selectClass}>
+          {Array.from({ length: 60 }, (_, minute) => (
+            <option key={minute} value={minute}>{String(minute).padStart(2, "0")}</option>
+          ))}
+        </select>
+        <select aria-label={`${label} AM or PM`} value={period} onChange={(event) => emit(hour12, minutes, event.target.value)} className={selectClass}>
+          <option value="AM">AM</option>
+          <option value="PM">PM</option>
+        </select>
+      </span>
+    </label>
+  );
+};
+
+/** Dates and times are read in the browser's time zone; start/end carry the exact instants for CloudTalk. */
+const rangeParams = (range: Range) =>
+  new URLSearchParams({
+    from: range.from,
+    to: range.to,
+    fromTime: range.fromTime,
+    toTime: range.toTime,
+    start: new Date(`${range.from}T${range.fromTime}:00`).toISOString(),
+    end: new Date(`${range.to}T${range.toTime}:59.999`).toISOString(),
+  });
 
 const duration = (seconds: number) => {
   const total = Math.max(0, Math.round(seconds));
@@ -120,8 +167,7 @@ export const App = () => {
     setLoading(true);
     setError("");
     try {
-      const params = new URLSearchParams({ from: next.from, to: next.to });
-      const res = await fetch(`/api/report?${params}`);
+      const res = await fetch(`/api/report?${rangeParams(next)}`);
       const body = await res.json();
       if (!res.ok) {
         if (res.status === 503 || res.status === 401) setConfigured(false);
@@ -160,8 +206,7 @@ export const App = () => {
     setFrejunLoading(true);
     setFrejunError("");
     try {
-      const params = new URLSearchParams({ from: next.from, to: next.to });
-      const res = await fetch(`/api/frejun?${params}`);
+      const res = await fetch(`/api/frejun?${rangeParams(next)}`);
       const body = await res.json();
       if (!res.ok) throw new Error(body.message || "Frejun could not be loaded.");
       setFrejun(body as FrejunReport);
@@ -266,6 +311,11 @@ export const App = () => {
                 className="mt-1 block rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5"
               />
             </label>
+            <TimePicker
+              label="From time"
+              value={range.fromTime}
+              onChange={(fromTime) => setRange((current) => ({ ...current, fromTime }))}
+            />
             <label className="text-xs text-[var(--muted)]">
               To
               <input
@@ -275,6 +325,11 @@ export const App = () => {
                 className="mt-1 block rounded-md border border-[var(--line)] bg-[var(--surface)] px-2 py-1.5"
               />
             </label>
+            <TimePicker
+              label="To time"
+              value={range.toTime}
+              onChange={(toTime) => setRange((current) => ({ ...current, toTime }))}
+            />
             <button
               type="submit"
               disabled={source === "frejun" ? frejunLoading : loading}

@@ -431,13 +431,16 @@ const summarizeLine = (number: NumberRow, rows: CallRow[], total: number | null,
   };
 };
 
-export const buildReport = (from: string, to: string): Promise<Report> => {
-  const key = `${from}|${to}`;
+/** Exact start and end instants (ISO) picked in the viewer's own time zone. */
+export type TimeWindow = { start: string; end: string };
+
+export const buildReport = (from: string, to: string, window: TimeWindow | null = null): Promise<Report> => {
+  const key = `${from}|${to}|${window?.start ?? ""}|${window?.end ?? ""}`;
   const cached = reportCache.get(key);
   if (cached && Date.now() - cached.at < REPORT_TTL_MS) return Promise.resolve(cached.report);
   const pending = reportInflight.get(key);
   if (pending) return pending;
-  const run = buildReportUncached(from, to)
+  const run = buildReportUncached(from, to, window)
     .then((report) => {
       reportCache.set(key, { at: Date.now(), report });
       reportInflight.delete(key);
@@ -514,11 +517,22 @@ const loadCalls = async (from: string, to: string): Promise<Fetched> => {
   return page;
 };
 
-const buildReportUncached = async (from: string, to: string): Promise<Report> => {
+const shiftDay = (day: string, by: number) => {
+  const date = new Date(`${day}T00:00:00`);
+  date.setDate(date.getDate() + by);
+  return isoDay(date.toISOString()) || day;
+};
+
+const buildReportUncached = async (from: string, to: string, window: TimeWindow | null): Promise<Report> => {
+  // CloudTalk filters by day in the account's time zone, so pad a day each side and cut to the exact window here.
+  const start = window ? Date.parse(window.start) : NaN;
+  const end = window ? Date.parse(window.end) : NaN;
+  const timed = Number.isFinite(start) && Number.isFinite(end);
+
   // One date-range query for all calls instead of one query per number; lines are matched afterwards.
   const [directory, callsPage, statsPage] = await Promise.all([
     loadDirectory(),
-    loadCalls(from, to),
+    timed ? loadCalls(shiftDay(from, -1), shiftDay(to, 1)) : loadCalls(from, to),
     getPage("/statistics/realtime/groups.json"),
   ]);
   const { agentsPage, numbersPage, groupsPage, tagsPage, contactsPage, notesPage } = directory;
@@ -528,12 +542,16 @@ const buildReportUncached = async (from: string, to: string): Promise<Report> =>
   const numbers = numbersPage.items.map(mapNumber);
   const calls: CallRow[] = [];
   const seen = new Set<string>();
-  const callsTotal = callsPage.total ?? 0;
   const callsError = callsPage.error;
+  const downloadComplete = !callsError && callsPage.items.length >= (callsPage.total ?? 0);
 
   for (const row of callsPage.items) {
     const call = mapCall(row, agentNames);
     if (!call.id && !call.startedAt) continue;
+    if (timed) {
+      const at = Date.parse(call.startedAt || "");
+      if (!Number.isFinite(at) || at < start || at > end) continue;
+    }
     if (call.id && seen.has(call.id)) continue;
     if (call.id) seen.add(call.id);
     const line = numbers.find((number) => sameLine(call.internalNumber, number.e164));
@@ -544,7 +562,9 @@ const buildReportUncached = async (from: string, to: string): Promise<Report> =>
     calls.push(call);
   }
 
-  const complete = !callsError && calls.length >= callsTotal;
+  // A complete download means every call in the window is here; otherwise CloudTalk's padded total is the best bound.
+  const callsTotal = downloadComplete ? calls.length : (callsPage.total ?? 0);
+  const complete = downloadComplete;
   const lines: LineSummary[] = numbers.map((number) => {
     const rows = calls.filter((call) => call.lineId === number.id);
     return summarizeLine(number, rows, complete ? rows.length : null, callsError);

@@ -353,13 +353,13 @@ var summarizeLine = (number, rows, total, error) => {
     error
   };
 };
-var buildReport = (from, to) => {
-  const key = `${from}|${to}`;
+var buildReport = (from, to, window = null) => {
+  const key = `${from}|${to}|${window?.start ?? ""}|${window?.end ?? ""}`;
   const cached = reportCache.get(key);
   if (cached && Date.now() - cached.at < REPORT_TTL_MS) return Promise.resolve(cached.report);
   const pending = reportInflight.get(key);
   if (pending) return pending;
-  const run = buildReportUncached(from, to).then((report) => {
+  const run = buildReportUncached(from, to, window).then((report) => {
     reportCache.set(key, { at: Date.now(), report });
     reportInflight.delete(key);
     return report;
@@ -413,10 +413,18 @@ var loadCalls = async (from, to) => {
   }
   return page;
 };
-var buildReportUncached = async (from, to) => {
+var shiftDay = (day, by) => {
+  const date = /* @__PURE__ */ new Date(`${day}T00:00:00`);
+  date.setDate(date.getDate() + by);
+  return isoDay(date.toISOString()) || day;
+};
+var buildReportUncached = async (from, to, window) => {
+  const start = window ? Date.parse(window.start) : NaN;
+  const end = window ? Date.parse(window.end) : NaN;
+  const timed = Number.isFinite(start) && Number.isFinite(end);
   const [directory, callsPage, statsPage] = await Promise.all([
     loadDirectory(),
-    loadCalls(from, to),
+    timed ? loadCalls(shiftDay(from, -1), shiftDay(to, 1)) : loadCalls(from, to),
     getPage("/statistics/realtime/groups.json")
   ]);
   const { agentsPage, numbersPage, groupsPage, tagsPage, contactsPage, notesPage } = directory;
@@ -425,11 +433,15 @@ var buildReportUncached = async (from, to) => {
   const numbers = numbersPage.items.map(mapNumber);
   const calls = [];
   const seen = /* @__PURE__ */ new Set();
-  const callsTotal = callsPage.total ?? 0;
   const callsError = callsPage.error;
+  const downloadComplete = !callsError && callsPage.items.length >= (callsPage.total ?? 0);
   for (const row of callsPage.items) {
     const call = mapCall(row, agentNames);
     if (!call.id && !call.startedAt) continue;
+    if (timed) {
+      const at = Date.parse(call.startedAt || "");
+      if (!Number.isFinite(at) || at < start || at > end) continue;
+    }
     if (call.id && seen.has(call.id)) continue;
     if (call.id) seen.add(call.id);
     const line = numbers.find((number) => sameLine(call.internalNumber, number.e164));
@@ -439,7 +451,8 @@ var buildReportUncached = async (from, to) => {
     }
     calls.push(call);
   }
-  const complete = !callsError && calls.length >= callsTotal;
+  const callsTotal = downloadComplete ? calls.length : callsPage.total ?? 0;
+  const complete = downloadComplete;
   const lines = numbers.map((number) => {
     const rows = calls.filter((call) => call.lineId === number.id);
     return summarizeLine(number, rows, complete ? rows.length : null, callsError);
@@ -565,9 +578,9 @@ var phone2 = (value) => {
   return raw.startsWith("+") ? raw : `+${raw}`;
 };
 var baseUrl = () => (process.env.FREJUN_API_BASE || "https://api.frejun.com").trim().replace(/\/+$/, "");
-var frejunStamp = (day, end) => {
+var frejunStamp = (day, time, end) => {
   const [year, month, date] = day.split("-");
-  return `${date}/${month}/${year.slice(2)} ${end ? "23:59:59" : "00:00:00"}`;
+  return `${date}/${month}/${year.slice(2)} ${time}:${end ? "59" : "00"}`;
 };
 var answeredStatus = (status, durationSeconds) => status === "answered" || durationSeconds > 0 && !status.includes("not-answered") && !status.includes("not-initiated");
 var eachDay2 = (from, to) => {
@@ -621,12 +634,12 @@ var fetchJson = async (url) => {
   }
   return { status: res.status, json: asRecord2(json2) };
 };
-var buildFrejunReport = async (from, to) => {
+var buildFrejunReport = async (from, to, fromTime = "00:00", toTime = "23:59") => {
   if (!frejunConfigured()) throw new Error("Add FREJUN_API_KEY to .env, then refresh.");
   const params = new URLSearchParams({
     page_size: String(PAGE_SIZE),
-    date: frejunStamp(from, false),
-    date_end: frejunStamp(to, true)
+    date: frejunStamp(from, fromTime, false),
+    date_end: frejunStamp(to, toTime, true)
   });
   let nextUrl = `${baseUrl()}/api/v1/integrations/calls/?${params}`;
   const calls = [];
@@ -718,6 +731,7 @@ var buildFrejunReport = async (from, to) => {
 
 // src/http.ts
 var dayPattern = /^\d{4}-\d{2}-\d{2}$/;
+var timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
 var routes = /* @__PURE__ */ new Set(["status", "report", "credentials", "frejun"]);
 var authFailure = (message) => /unauthor|forbidden|rejected the key|\b401\b|\b403\b/i.test(message);
 var onVercel = () => Boolean(process.env.VERCEL);
@@ -742,10 +756,18 @@ var readRange = (url) => {
   const fallback = defaultRange();
   const from = url.searchParams.get("from") || fallback.from;
   const to = url.searchParams.get("to") || fallback.to;
+  const fromTime = url.searchParams.get("fromTime") || "00:00";
+  const toTime = url.searchParams.get("toTime") || "23:59";
   if (!dayPattern.test(from) || !dayPattern.test(to) || from > to) {
     return { ok: false, response: json(400, { message: "Use a from date and a to date as YYYY-MM-DD, with from on or before to." }) };
   }
-  return { ok: true, from, to };
+  if (!timePattern.test(fromTime) || !timePattern.test(toTime) || `${from} ${fromTime}` > `${to} ${toTime}`) {
+    return { ok: false, response: json(400, { message: "Use times as HH:MM, with the start on or before the end." }) };
+  }
+  const start = url.searchParams.get("start") || "";
+  const end = url.searchParams.get("end") || "";
+  const window = Number.isFinite(Date.parse(start)) && Number.isFinite(Date.parse(end)) ? { start, end } : null;
+  return { ok: true, from, to, fromTime, toTime, window };
 };
 var handleApi = async (request) => {
   const url = new URL(request.url);
@@ -781,7 +803,7 @@ var handleApi = async (request) => {
     const range = readRange(url);
     if (!range.ok) return range.response;
     try {
-      return json(200, await buildFrejunReport(range.from, range.to));
+      return json(200, await buildFrejunReport(range.from, range.to, range.fromTime, range.toTime));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Frejun could not be reached.";
       const status = /unauthor|401|403/i.test(message) ? 401 : 502;
@@ -800,7 +822,7 @@ var handleApi = async (request) => {
     const span = (Date.parse(`${range.to}T00:00:00`) - Date.parse(`${range.from}T00:00:00`)) / 864e5;
     if (span > 366) return json(400, { message: "Pick a range of 366 days or fewer." });
     try {
-      const report = await buildReport(range.from, range.to);
+      const report = await buildReport(range.from, range.to, range.window);
       const failures = report.sources.filter((item) => item.error);
       if (failures.length === report.sources.length) {
         const message = failures[0]?.error || "CloudTalk did not return any data.";

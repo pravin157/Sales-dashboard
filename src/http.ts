@@ -1,8 +1,9 @@
 import "dotenv/config";
-import { buildReport, credentialsConfigured, saveCredentials } from "./cloudtalk.js";
+import { buildReport, credentialsConfigured, saveCredentials, type TimeWindow } from "./cloudtalk.js";
 import { buildFrejunReport, frejunConfigured } from "./frejun.js";
 
 const dayPattern = /^\d{4}-\d{2}-\d{2}$/;
+const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
 const routes = new Set(["status", "report", "credentials", "frejun"]);
 
 const authFailure = (message: string) => /unauthor|forbidden|rejected the key|\b401\b|\b403\b/i.test(message);
@@ -29,14 +30,24 @@ const routeOf = (url: URL) => {
   return parts[parts.length - 1] || "";
 };
 
-const readRange = (url: URL): { ok: false; response: Response } | { ok: true; from: string; to: string } => {
+type Range = { from: string; to: string; fromTime: string; toTime: string; window: TimeWindow | null };
+
+const readRange = (url: URL): { ok: false; response: Response } | ({ ok: true } & Range) => {
   const fallback = defaultRange();
   const from = url.searchParams.get("from") || fallback.from;
   const to = url.searchParams.get("to") || fallback.to;
+  const fromTime = url.searchParams.get("fromTime") || "00:00";
+  const toTime = url.searchParams.get("toTime") || "23:59";
   if (!dayPattern.test(from) || !dayPattern.test(to) || from > to) {
     return { ok: false, response: json(400, { message: "Use a from date and a to date as YYYY-MM-DD, with from on or before to." }) };
   }
-  return { ok: true, from, to };
+  if (!timePattern.test(fromTime) || !timePattern.test(toTime) || `${from} ${fromTime}` > `${to} ${toTime}`) {
+    return { ok: false, response: json(400, { message: "Use times as HH:MM, with the start on or before the end." }) };
+  }
+  const start = url.searchParams.get("start") || "";
+  const end = url.searchParams.get("end") || "";
+  const window = Number.isFinite(Date.parse(start)) && Number.isFinite(Date.parse(end)) ? { start, end } : null;
+  return { ok: true, from, to, fromTime, toTime, window };
 };
 
 export const handleApi = async (request: Request): Promise<Response> => {
@@ -78,7 +89,7 @@ export const handleApi = async (request: Request): Promise<Response> => {
     const range = readRange(url);
     if (!range.ok) return range.response;
     try {
-      return json(200, await buildFrejunReport(range.from, range.to));
+      return json(200, await buildFrejunReport(range.from, range.to, range.fromTime, range.toTime));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Frejun could not be reached.";
       const status = /unauthor|401|403/i.test(message) ? 401 : 502;
@@ -101,7 +112,7 @@ export const handleApi = async (request: Request): Promise<Response> => {
     if (span > 366) return json(400, { message: "Pick a range of 366 days or fewer." });
 
     try {
-      const report = await buildReport(range.from, range.to);
+      const report = await buildReport(range.from, range.to, range.window);
       const failures = report.sources.filter((item) => item.error);
       if (failures.length === report.sources.length) {
         const message = failures[0]?.error || "CloudTalk did not return any data.";

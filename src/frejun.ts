@@ -85,9 +85,9 @@ const phone = (value: unknown) => {
 
 const baseUrl = () => (process.env.FREJUN_API_BASE || "https://api.frejun.com").trim().replace(/\/+$/, "");
 
-const frejunStamp = (day: string, end: boolean) => {
+const frejunStamp = (day: string, time: string, end: boolean) => {
   const [year, month, date] = day.split("-");
-  return `${date}/${month}/${year.slice(2)} ${end ? "23:59:59" : "00:00:00"}`;
+  return `${date}/${month}/${year.slice(2)} ${time}:${end ? "59" : "00"}`;
 };
 
 const answeredStatus = (status: string, durationSeconds: number) =>
@@ -148,13 +148,13 @@ const fetchJson = async (url: string) => {
   return { status: res.status, json: asRecord(json) };
 };
 
-export const buildFrejunReport = async (from: string, to: string): Promise<FrejunReport> => {
+export const buildFrejunReport = async (from: string, to: string, fromTime = "00:00", toTime = "23:59"): Promise<FrejunReport> => {
   if (!frejunConfigured()) throw new Error("Add FREJUN_API_KEY to .env, then refresh.");
 
   const params = new URLSearchParams({
     page_size: String(PAGE_SIZE),
-    date: frejunStamp(from, false),
-    date_end: frejunStamp(to, true),
+    date: frejunStamp(from, fromTime, false),
+    date_end: frejunStamp(to, toTime, true),
   });
   let nextUrl: string | null = `${baseUrl()}/api/v1/integrations/calls/?${params}`;
   const calls: FrejunCall[] = [];
